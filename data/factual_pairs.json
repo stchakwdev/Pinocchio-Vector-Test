@@ -1,0 +1,22 @@
+[
+  {"true_statement": "The capital of France is Paris.", "false_statement": "The capital of France is Berlin.", "category": "geography"},
+  {"true_statement": "The capital of Japan is Tokyo.", "false_statement": "The capital of Japan is Beijing.", "category": "geography"},
+  {"true_statement": "The capital of Australia is Canberra.", "false_statement": "The capital of Australia is Sydney.", "category": "geography"},
+  {"true_statement": "The capital of Brazil is Brasilia.", "false_statement": "The capital of Brazil is Rio de Janeiro.", "category": "geography"},
+  {"true_statement": "The capital of Canada is Ottawa.", "false_statement": "The capital of Canada is Toronto.", "category": "geography"},
+  {"true_statement": "Water freezes at zero degrees Celsius.", "false_statement": "Water freezes at fifty degrees Celsius.", "category": "science"},
+  {"true_statement": "Water boils at one hundred degrees Celsius.", "false_statement": "Water boils at fifty degrees Celsius.", "category": "science"},
+  {"true_statement": "The Earth orbits around the Sun.", "false_statement": "The Sun orbits around the Earth.", "category": "science"},
+  {"true_statement": "Light travels faster than sound.", "false_statement": "Sound travels faster than light.", "category": "science"},
+  {"true_statement": "Diamonds are made of carbon.", "false_statement": "Diamonds are made of silicon.", "category": "science"},
+  {"true_statement": "World War II ended in 1945.", "false_statement": "World War II ended in 1950.", "category": "history"},
+  {"true_statement": "The first human walked on the moon in 1969.", "false_statement": "The first human walked on the moon in 1959.", "category": "history"},
+  {"true_statement": "The Berlin Wall fell in 1989.", "false_statement": "The Berlin Wall fell in 1979.", "category": "history"},
+  {"true_statement": "Christopher Columbus sailed to America in 1492.", "false_statement": "Christopher Columbus sailed to America in 1592.", "category": "history"},
+  {"true_statement": "The French Revolution began in 1789.", "false_statement": "The French Revolution began in 1689.", "category": "history"},
+  {"true_statement": "Two plus two equals four.", "false_statement": "Two plus two equals five.", "category": "math"},
+  {"true_statement": "Seven times eight equals fifty-six.", "false_statement": "Seven times eight equals sixty-four.", "category": "math"},
+  {"true_statement": "The square root of sixteen is four.", "false_statement": "The square root of sixteen is eight.", "category": "math"},
+  {"true_statement": "Ten divided by two equals five.", "false_statement": "Ten divided by two equals four.", "category": "math"},
+  {"true_statement": "Three squared equals nine.", "false_statement": "Three squared equals six.", "category": "math"}
+]

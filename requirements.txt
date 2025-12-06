@@ -1,0 +1,27 @@
+# Pinocchio Vector Test - Dependencies
+# Core ML
+torch>=2.0.0
+transformers>=4.35.0
+transformer-lens>=1.14.0
+
+# Numerical
+numpy>=1.24.0
+scipy>=1.11.0
+pandas>=2.0.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.15.0
+
+# TransformerLens dependencies
+einops>=0.7.0
+jaxtyping>=0.2.0
+
+# Utilities
+tqdm>=4.65.0
+ipywidgets>=8.0.0
+
+# Jupyter
+jupyter>=1.0.0
+nbformat>=5.9.0
