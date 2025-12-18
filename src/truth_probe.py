@@ -15,7 +15,7 @@ from sklearn.decomposition import PCA
 def compute_truth_direction(
     true_activations: Dict[int, torch.Tensor],
     false_activations: Dict[int, torch.Tensor],
-    method: Literal["difference_in_means", "pca", "logistic"] = "difference_in_means",
+    method: Literal["difference_in_means", "pca", "logistic", "mass_mean"] = "difference_in_means",
     normalize: bool = True,
 ) -> Dict[int, torch.Tensor]:
     """
@@ -26,8 +26,9 @@ def compute_truth_direction(
         false_activations: Dict mapping layer to false statement activations [n_false, d_model]
         method: Extraction method
             - 'difference_in_means': Simple mean difference (recommended)
-            - 'pca': First principal component of differences
-            - 'logistic': Logistic regression weight vector
+            - 'pca': First principal component of differences (2D subspace)
+            - 'logistic': Logistic regression weight vector (best classification)
+            - 'mass_mean': Mass-mean probing (better causal directions per research)
         normalize: Whether to normalize to unit vector
 
     Returns:
@@ -49,6 +50,8 @@ def compute_truth_direction(
             direction = _pca_direction(true_acts, false_acts)
         elif method == "logistic":
             direction = _logistic_direction(true_acts, false_acts)
+        elif method == "mass_mean":
+            direction = _mass_mean_direction(true_acts, false_acts)
         else:
             raise ValueError(f"Unknown method: {method}")
 
@@ -97,7 +100,7 @@ def _pca_direction(
         i = np.random.randint(n_true)
         j = np.random.randint(n_false)
         diff = true_acts[i] - false_acts[j]
-        differences.append(diff.cpu().numpy())
+        differences.append(diff.cpu().float().numpy())  # Convert to float32
 
     differences = np.stack(differences)
 
@@ -108,12 +111,12 @@ def _pca_direction(
     direction = torch.from_numpy(pca.components_[0]).float()
 
     # Ensure direction points toward "true"
-    mean_true = true_acts.mean(dim=0).cpu()
-    mean_false = false_acts.mean(dim=0).cpu()
+    mean_true = true_acts.mean(dim=0).cpu().float()  # Convert to float32
+    mean_false = false_acts.mean(dim=0).cpu().float()  # Convert to float32
     if (mean_true @ direction) < (mean_false @ direction):
         direction = -direction
 
-    return direction.to(true_acts.device)
+    return direction.to(true_acts.device).to(true_acts.dtype)
 
 
 def _logistic_direction(
@@ -125,8 +128,8 @@ def _logistic_direction(
 
     The weight vector of a linear classifier separating true from false.
     """
-    # Prepare data
-    X = torch.cat([true_acts, false_acts], dim=0).cpu().numpy()
+    # Prepare data - convert to float32 for sklearn
+    X = torch.cat([true_acts, false_acts], dim=0).cpu().float().numpy()
     y = np.concatenate([
         np.ones(len(true_acts)),
         np.zeros(len(false_acts))
@@ -138,7 +141,114 @@ def _logistic_direction(
 
     # Extract weight vector
     direction = torch.from_numpy(clf.coef_[0]).float()
-    return direction.to(true_acts.device)
+    return direction.to(true_acts.device).to(true_acts.dtype)
+
+
+def _mass_mean_direction(
+    true_acts: torch.Tensor,
+    false_acts: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute truth direction using mass-mean probing.
+
+    This method centers the data by subtracting the global mean before computing
+    the difference in means. Research shows this produces directions that are
+    more causally implicated in model outputs compared to simple difference-in-means.
+
+    Reference: "The Geometry of Truth" (2023)
+    """
+    # Compute global mean (mass center)
+    all_acts = torch.cat([true_acts, false_acts], dim=0)
+    global_mean = all_acts.mean(dim=0)
+
+    # Center both distributions
+    true_centered = true_acts - global_mean
+    false_centered = false_acts - global_mean
+
+    # Compute difference in centered means
+    mean_true = true_centered.mean(dim=0)
+    mean_false = false_centered.mean(dim=0)
+
+    return mean_true - mean_false
+
+
+def compare_probe_methods(
+    true_activations: Dict[int, torch.Tensor],
+    false_activations: Dict[int, torch.Tensor],
+    test_true_activations: Optional[Dict[int, torch.Tensor]] = None,
+    test_false_activations: Optional[Dict[int, torch.Tensor]] = None,
+    methods: List[str] = None,
+) -> Dict[str, Dict]:
+    """
+    Compare all probe methods and return metrics for each.
+
+    Args:
+        true_activations: Training true activations
+        false_activations: Training false activations
+        test_true_activations: Test true activations (optional, uses train if None)
+        test_false_activations: Test false activations (optional, uses train if None)
+        methods: List of methods to compare (default: all four)
+
+    Returns:
+        Dict mapping method name to dict of {layer: metrics}
+    """
+    if methods is None:
+        methods = ["difference_in_means", "pca", "logistic", "mass_mean"]
+
+    if test_true_activations is None:
+        test_true_activations = true_activations
+    if test_false_activations is None:
+        test_false_activations = false_activations
+
+    results = {}
+
+    for method in methods:
+        print(f"  Testing {method}...")
+        truth_vectors = compute_truth_direction(
+            true_activations, false_activations, method=method
+        )
+
+        method_results = {}
+        for layer in truth_vectors.keys():
+            metrics = evaluate_probe_accuracy(
+                truth_vectors[layer],
+                test_true_activations[layer],
+                test_false_activations[layer],
+            )
+            method_results[layer] = metrics
+
+        results[method] = method_results
+
+    return results
+
+
+def get_best_method_and_layer(
+    comparison_results: Dict[str, Dict],
+    metric: str = "separation",
+) -> Tuple[str, int, float]:
+    """
+    Find the best method and layer combination from comparison results.
+
+    Args:
+        comparison_results: Output from compare_probe_methods
+        metric: Which metric to optimize ('separation', 'accuracy', 'balanced_accuracy')
+
+    Returns:
+        Tuple of (best_method, best_layer, best_value)
+    """
+    best_method = None
+    best_layer = None
+    best_value = float('-inf')
+
+    for method, layer_results in comparison_results.items():
+        for layer, metrics in layer_results.items():
+            value = metrics[metric]
+            if value > best_value:
+                best_value = value
+                best_method = method
+                best_layer = layer
+
+    return best_method, best_layer, best_value
 
 
 def project_onto_truth(

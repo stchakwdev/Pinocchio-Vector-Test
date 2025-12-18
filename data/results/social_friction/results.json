@@ -1,0 +1,46 @@
+{
+  "experiment": "social_friction_v1",
+  "model": "EleutherAI/pythia-1.4b-deduped",
+  "best_layer": 13,
+  "factorial_analysis": {
+    "means": {
+      "uncomfortable_truth": -4.808983325958252,
+      "comfortable_truth": -6.227318286895752,
+      "comfortable_lie": -5.305109977722168,
+      "uncomfortable_lie": -4.745555400848389
+    },
+    "main_effect_truth": {
+      "t_stat": -2.0775608406010098,
+      "p_value": 0.04218705217170748,
+      "cohens_d": -0.5364239001393883,
+      "significant": true,
+      "direction": "lie > truth",
+      "mean_truth": -5.518150806427002,
+      "mean_lie": -5.025332450866699
+    },
+    "main_effect_valence": {
+      "t_stat": -4.736523828505728,
+      "p_value": 1.4457591860435769e-05,
+      "cohens_d": -1.2229651957031393,
+      "significant": true,
+      "direction": "negative > positive",
+      "mean_positive": -5.766214370727539,
+      "mean_negative": -4.7772698402404785
+    },
+    "interaction": {
+      "value": -0.8587803840637207,
+      "interpretation": "Negative interaction: valence has WEAKER effect on truth than lies",
+      "truth_valence_effect": -1.4183349609375,
+      "lie_valence_effect": -0.5595545768737793
+    }
+  },
+  "entropy_significant_layers": [
+    15
+  ],
+  "prompt_counts": {
+    "uncomfortable_truth": 15,
+    "comfortable_truth": 15,
+    "comfortable_lie": 15,
+    "uncomfortable_lie": 15
+  }
+}

@@ -416,6 +416,298 @@ def create_summary_figure(
     return fig
 
 
+def plot_method_comparison(
+    method_results: Dict[str, Dict],
+    metric: str = "separation",
+    figsize: Tuple[int, int] = (12, 6),
+) -> plt.Figure:
+    """
+    Plot comparison of probe methods showing best performance for each.
+
+    Args:
+        method_results: Dict from compare_probe_methods {method: {layer: metrics}}
+        metric: Which metric to compare ('separation', 'accuracy', 'balanced_accuracy')
+        figsize: Figure size
+
+    Returns:
+        Matplotlib figure
+    """
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    methods = list(method_results.keys())
+    best_values = []
+    best_layers = []
+    all_layer_data = {}
+
+    for method in methods:
+        layer_results = method_results[method]
+        best_layer = max(layer_results.keys(), key=lambda l: layer_results[l][metric])
+        best_values.append(layer_results[best_layer][metric])
+        best_layers.append(best_layer)
+        all_layer_data[method] = {l: layer_results[l][metric] for l in sorted(layer_results.keys())}
+
+    # Left: Bar chart of best performance
+    ax1 = axes[0]
+    colors = ['#2ecc71', '#3498db', '#9b59b6', '#e74c3c']
+    bars = ax1.bar(methods, best_values, color=colors[:len(methods)])
+
+    # Add value labels on bars
+    for bar, val, layer in zip(bars, best_values, best_layers):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
+                f'{val:.2f}\n(L{layer})', ha='center', va='bottom', fontsize=10)
+
+    ax1.set_ylabel(metric.replace('_', ' ').title(), fontsize=12)
+    ax1.set_title(f'Best {metric.replace("_", " ").title()} by Method', fontsize=14, fontweight='bold')
+    ax1.axhline(0, color='black', linewidth=0.5)
+
+    # Right: Line plot across layers
+    ax2 = axes[1]
+    for method, color in zip(methods, colors):
+        layers = sorted(all_layer_data[method].keys())
+        values = [all_layer_data[method][l] for l in layers]
+        ax2.plot(layers, values, marker='o', label=method, color=color, linewidth=2, markersize=6)
+
+    ax2.set_xlabel('Layer', fontsize=12)
+    ax2.set_ylabel(metric.replace('_', ' ').title(), fontsize=12)
+    ax2.set_title(f'{metric.replace("_", " ").title()} Across Layers', fontsize=14, fontweight='bold')
+    ax2.legend(loc='best')
+    ax2.axhline(0, color='black', linewidth=0.5)
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_entropy_by_layer(
+    entropy_results: Dict[int, Dict],
+    figsize: Tuple[int, int] = (12, 6),
+) -> plt.Figure:
+    """
+    Plot entropy comparison across layers.
+
+    Shows whether deceptive responses have higher entropy (internal conflict).
+
+    Args:
+        entropy_results: Output from compare_entropy()
+        figsize: Figure size
+
+    Returns:
+        Matplotlib figure
+    """
+    layers = sorted(entropy_results.keys())
+    sch_entropy = [entropy_results[l]["scheming_mean"] for l in layers]
+    hon_entropy = [entropy_results[l]["honest_mean"] for l in layers]
+    significant = [entropy_results[l]["significant"] for l in layers]
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # Left: Line plot of entropy by layer
+    ax1 = axes[0]
+    ax1.plot(layers, sch_entropy, marker='o', linewidth=2, markersize=8,
+             label="Scheming", color="red")
+    ax1.plot(layers, hon_entropy, marker='s', linewidth=2, markersize=8,
+             label="Honest", color="green")
+
+    # Highlight significant layers
+    for i, (layer, sig) in enumerate(zip(layers, significant)):
+        if sig:
+            ax1.axvspan(layer - 0.3, layer + 0.3, alpha=0.2, color='yellow')
+
+    ax1.set_xlabel("Layer", fontsize=12)
+    ax1.set_ylabel("Activation Entropy", fontsize=12)
+    ax1.set_title("Entropy Across Layers\n(Yellow = Significant Difference)", fontsize=14, fontweight='bold')
+    ax1.legend()
+
+    # Right: Bar chart of entropy difference
+    ax2 = axes[1]
+    differences = [entropy_results[l]["difference"] for l in layers]
+    colors = ['red' if d > 0 else 'green' for d in differences]
+    bars = ax2.bar(layers, differences, color=colors, alpha=0.7)
+
+    # Mark significant bars
+    for i, (bar, sig) in enumerate(zip(bars, significant)):
+        if sig:
+            bar.set_edgecolor('black')
+            bar.set_linewidth(2)
+            ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                    '*', ha='center', fontsize=14, fontweight='bold')
+
+    ax2.axhline(0, color='black', linewidth=0.5)
+    ax2.set_xlabel("Layer", fontsize=12)
+    ax2.set_ylabel("Entropy Difference (Scheming - Honest)", fontsize=12)
+    ax2.set_title("Entropy Difference by Layer\n(* = p < 0.05)", fontsize=14, fontweight='bold')
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_consistency_comparison(
+    scheming_consistency: List[float],
+    honest_consistency: List[float],
+    comparison_results: Optional[Dict] = None,
+    figsize: Tuple[int, int] = (10, 6),
+) -> plt.Figure:
+    """
+    Plot consistency distributions for scheming vs honest prompts.
+
+    Higher consistency = more stable activations.
+    Hypothesis: Deception requires more "searching" → lower consistency.
+
+    Args:
+        scheming_consistency: List of consistency scores for scheming prompts
+        honest_consistency: List of consistency scores for honest prompts
+        comparison_results: Optional dict with statistical results
+        figsize: Figure size
+
+    Returns:
+        Matplotlib figure
+    """
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # Left: Box plot comparison
+    ax1 = axes[0]
+    bp = ax1.boxplot([honest_consistency, scheming_consistency],
+                     labels=["Honest", "Scheming"],
+                     patch_artist=True)
+    bp['boxes'][0].set_facecolor('green')
+    bp['boxes'][0].set_alpha(0.5)
+    bp['boxes'][1].set_facecolor('red')
+    bp['boxes'][1].set_alpha(0.5)
+
+    ax1.set_ylabel("Consistency (Cosine Similarity)", fontsize=12)
+    ax1.set_title("Activation Consistency", fontsize=14, fontweight='bold')
+
+    # Add mean markers
+    ax1.scatter([1], [np.mean(honest_consistency)], marker='D', s=100, color='darkgreen', zorder=5, label='Mean')
+    ax1.scatter([2], [np.mean(scheming_consistency)], marker='D', s=100, color='darkred', zorder=5)
+
+    # Right: Overlapping distributions
+    ax2 = axes[1]
+    sns.kdeplot(honest_consistency, ax=ax2, label="Honest", color="green", fill=True, alpha=0.3)
+    sns.kdeplot(scheming_consistency, ax=ax2, label="Scheming", color="red", fill=True, alpha=0.3)
+
+    ax2.axvline(np.mean(honest_consistency), color="green", linestyle="--", linewidth=2)
+    ax2.axvline(np.mean(scheming_consistency), color="red", linestyle="--", linewidth=2)
+
+    ax2.set_xlabel("Consistency Score", fontsize=12)
+    ax2.set_ylabel("Density", fontsize=12)
+    ax2.set_title("Consistency Distributions", fontsize=14, fontweight='bold')
+    ax2.legend()
+
+    # Add statistics text if provided
+    if comparison_results:
+        stats_text = (f"Honest: {comparison_results['honest_mean']:.4f} ± {comparison_results['honest_std']:.4f}\n"
+                     f"Scheming: {comparison_results['scheming_mean']:.4f} ± {comparison_results['scheming_std']:.4f}\n"
+                     f"p-value: {comparison_results['p_value']:.4f}\n"
+                     f"Cohen's d: {comparison_results['cohens_d']:.3f}")
+        ax2.text(0.02, 0.98, stats_text, transform=ax2.transAxes,
+                verticalalignment='top', fontsize=9,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_2x2_factorial(
+    scores_by_condition: Dict[str, np.ndarray],
+    metric_name: str = "Truth Score",
+    figsize: Tuple[int, int] = (12, 8),
+) -> plt.Figure:
+    """
+    Plot 2x2 factorial design results for social friction experiment.
+
+    Conditions: uncomfortable_truth, comfortable_truth, comfortable_lie, uncomfortable_lie
+
+    Args:
+        scores_by_condition: Dict mapping condition name to scores array
+        metric_name: Name of the metric being plotted
+        figsize: Figure size
+
+    Returns:
+        Matplotlib figure
+    """
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # Expected condition names
+    conditions = ["comfortable_truth", "uncomfortable_truth", "comfortable_lie", "uncomfortable_lie"]
+
+    # Check which conditions are available
+    available = [c for c in conditions if c in scores_by_condition]
+
+    if len(available) < 2:
+        ax = axes[0]
+        ax.text(0.5, 0.5, "Insufficient data for 2x2 analysis",
+               ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        axes[1].axis('off')
+        return fig
+
+    # Left: Bar plot with means
+    ax1 = axes[0]
+    means = [np.mean(scores_by_condition[c]) for c in available]
+    stds = [np.std(scores_by_condition[c]) for c in available]
+
+    colors = {
+        "comfortable_truth": "green",
+        "uncomfortable_truth": "lightgreen",
+        "comfortable_lie": "red",
+        "uncomfortable_lie": "lightcoral"
+    }
+
+    bar_colors = [colors.get(c, "gray") for c in available]
+    bars = ax1.bar(range(len(available)), means, yerr=stds, capsize=5, color=bar_colors, alpha=0.7)
+
+    ax1.set_xticks(range(len(available)))
+    ax1.set_xticklabels([c.replace("_", "\n") for c in available], fontsize=10)
+    ax1.set_ylabel(metric_name, fontsize=12)
+    ax1.set_title("Mean Scores by Condition", fontsize=14, fontweight='bold')
+    ax1.axhline(0, color='black', linewidth=0.5)
+
+    # Right: Interaction plot (if all 4 conditions present)
+    ax2 = axes[1]
+
+    if len(available) == 4:
+        # Create interaction plot
+        truth_levels = ["Truth", "Lie"]
+        valence_levels = ["Comfortable", "Uncomfortable"]
+
+        truth_means = [
+            np.mean(scores_by_condition["comfortable_truth"]),
+            np.mean(scores_by_condition["uncomfortable_truth"])
+        ]
+        lie_means = [
+            np.mean(scores_by_condition["comfortable_lie"]),
+            np.mean(scores_by_condition["uncomfortable_lie"])
+        ]
+
+        ax2.plot([0, 1], truth_means, marker='o', linewidth=2, markersize=10,
+                label="Truthful", color="green")
+        ax2.plot([0, 1], lie_means, marker='s', linewidth=2, markersize=10,
+                label="Deceptive", color="red")
+
+        ax2.set_xticks([0, 1])
+        ax2.set_xticklabels(valence_levels)
+        ax2.set_xlabel("Social Valence", fontsize=12)
+        ax2.set_ylabel(metric_name, fontsize=12)
+        ax2.set_title("Interaction: Truth × Valence", fontsize=14, fontweight='bold')
+        ax2.legend()
+
+        # Check for interaction
+        truth_diff = truth_means[1] - truth_means[0]  # Effect of valence on truth
+        lie_diff = lie_means[1] - lie_means[0]  # Effect of valence on lies
+        interaction = truth_diff - lie_diff
+
+        ax2.text(0.02, 0.02, f"Interaction: {interaction:.3f}",
+                transform=ax2.transAxes, fontsize=10,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    else:
+        ax2.text(0.5, 0.5, "Need all 4 conditions\nfor interaction plot",
+                ha='center', va='center', fontsize=12)
+        ax2.axis('off')
+
+    plt.tight_layout()
+    return fig
+
+
 def save_all_figures(
     figures: Dict[str, plt.Figure],
     output_dir: str,

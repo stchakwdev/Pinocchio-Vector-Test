@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 from scipy import stats
 import pandas as pd
+import torch
+import torch.nn.functional as F
 
 
 def compute_dprime(
@@ -409,3 +411,464 @@ def bootstrap_confidence_interval(
     upper = np.percentile(bootstrap_stats, 100 * (1 - alpha / 2))
 
     return lower, upper
+
+
+# =============================================================================
+# ENTROPY & CONSISTENCY PROBES
+# =============================================================================
+
+def compute_activation_entropy(activation: torch.Tensor) -> float:
+    """
+    Compute Shannon entropy of activation magnitudes across neurons.
+
+    Higher entropy indicates more distributed (uncertain) activation patterns.
+    Lower entropy indicates more concentrated (confident) patterns.
+
+    Hypothesis: Deception creates internal conflict → higher entropy.
+
+    Args:
+        activation: Activation vector [d_model] or [1, d_model]
+
+    Returns:
+        Shannon entropy value
+    """
+    # Flatten if needed
+    act = activation.flatten().float()
+
+    # Use absolute values (magnitude)
+    norm_acts = torch.abs(act)
+
+    # Normalize to probability distribution
+    total = norm_acts.sum() + 1e-10
+    p = norm_acts / total
+
+    # Shannon entropy: -Σ p(i) * log(p(i))
+    entropy = -(p * torch.log(p + 1e-10)).sum().item()
+
+    return entropy
+
+
+def compute_batch_entropy(activations: torch.Tensor) -> np.ndarray:
+    """
+    Compute entropy for a batch of activations.
+
+    Args:
+        activations: Batch of activations [n_samples, d_model]
+
+    Returns:
+        Array of entropy values [n_samples]
+    """
+    entropies = []
+    for i in range(activations.shape[0]):
+        ent = compute_activation_entropy(activations[i])
+        entropies.append(ent)
+    return np.array(entropies)
+
+
+def compare_entropy(
+    scheming_acts: Dict[int, torch.Tensor],
+    honest_acts: Dict[int, torch.Tensor],
+    hallucination_acts: Optional[Dict[int, torch.Tensor]] = None,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Compare activation entropy between conditions across layers.
+
+    Hypothesis: Deceptive outputs show higher entropy due to internal conflict
+    between truthful representations and forced deceptive output.
+
+    Args:
+        scheming_acts: Dict mapping layer to scheming activations [n, d_model]
+        honest_acts: Dict mapping layer to honest activations [n, d_model]
+        hallucination_acts: Optional dict for hallucination condition
+
+    Returns:
+        Dict mapping layer to entropy comparison metrics
+    """
+    results = {}
+
+    for layer in scheming_acts.keys():
+        sch_entropy = compute_batch_entropy(scheming_acts[layer])
+        hon_entropy = compute_batch_entropy(honest_acts[layer])
+
+        # T-test comparing entropy distributions
+        t_stat, p_value = stats.ttest_ind(sch_entropy, hon_entropy)
+
+        layer_result = {
+            "scheming_mean": float(np.mean(sch_entropy)),
+            "scheming_std": float(np.std(sch_entropy)),
+            "honest_mean": float(np.mean(hon_entropy)),
+            "honest_std": float(np.std(hon_entropy)),
+            "difference": float(np.mean(sch_entropy) - np.mean(hon_entropy)),
+            "t_statistic": float(t_stat),
+            "p_value": float(p_value),
+            "significant": p_value < 0.05,
+            "cohens_d": compute_cohens_d(sch_entropy, hon_entropy),
+        }
+
+        # Add hallucination comparison if provided
+        if hallucination_acts is not None and layer in hallucination_acts:
+            hal_entropy = compute_batch_entropy(hallucination_acts[layer])
+            t_hal, p_hal = stats.ttest_ind(sch_entropy, hal_entropy)
+            layer_result["hallucination_mean"] = float(np.mean(hal_entropy))
+            layer_result["sch_vs_hal_p_value"] = float(p_hal)
+
+        results[layer] = layer_result
+
+    return results
+
+
+def compute_activation_consistency(
+    activations_list: List[torch.Tensor],
+) -> float:
+    """
+    Measure consistency of activations across multiple forward passes.
+
+    Higher consistency = more stable representations.
+    Lower consistency = model "searching" for response.
+
+    Hypothesis: Lies require more computation → less stable activations.
+
+    Args:
+        activations_list: List of activation tensors from repeated runs
+
+    Returns:
+        Mean pairwise cosine similarity (0 to 1)
+    """
+    if len(activations_list) < 2:
+        return 1.0
+
+    # Flatten each activation
+    flattened = [a.flatten().float() for a in activations_list]
+
+    # Compute pairwise cosine similarities
+    similarities = []
+    for i in range(len(flattened)):
+        for j in range(i + 1, len(flattened)):
+            sim = F.cosine_similarity(
+                flattened[i].unsqueeze(0),
+                flattened[j].unsqueeze(0)
+            ).item()
+            similarities.append(sim)
+
+    return float(np.mean(similarities))
+
+
+def measure_prompt_consistency(
+    model,
+    prompt: str,
+    layer: int,
+    n_runs: int = 5,
+    extract_fn=None,
+) -> float:
+    """
+    Measure activation consistency for a single prompt across multiple runs.
+
+    Note: For deterministic models without dropout, this may not show variation.
+    Consider adding small input perturbations for meaningful consistency measures.
+
+    Args:
+        model: The language model
+        prompt: Input prompt text
+        layer: Layer to extract activations from
+        n_runs: Number of forward passes
+        extract_fn: Function to extract activations (batch_extract_activations)
+
+    Returns:
+        Consistency score (mean pairwise cosine similarity)
+    """
+    if extract_fn is None:
+        raise ValueError("Must provide extract_fn (e.g., batch_extract_activations)")
+
+    activations = []
+    for _ in range(n_runs):
+        acts = extract_fn(model, [prompt], [layer])
+        activations.append(acts[layer][0].cpu())  # First sample, specified layer
+
+    return compute_activation_consistency(activations)
+
+
+def compare_consistency(
+    model,
+    scheming_prompts: List[str],
+    honest_prompts: List[str],
+    layer: int,
+    n_runs: int = 3,
+    extract_fn=None,
+) -> Dict[str, Any]:
+    """
+    Compare activation consistency between scheming and honest prompts.
+
+    Args:
+        model: The language model
+        scheming_prompts: List of scheming prompt strings
+        honest_prompts: List of honest prompt strings
+        layer: Layer to analyze
+        n_runs: Number of runs per prompt
+        extract_fn: Activation extraction function
+
+    Returns:
+        Dict with consistency comparison results
+    """
+    if extract_fn is None:
+        raise ValueError("Must provide extract_fn")
+
+    # Measure consistency for each prompt
+    sch_consistency = []
+    for prompt in scheming_prompts:
+        cons = measure_prompt_consistency(model, prompt, layer, n_runs, extract_fn)
+        sch_consistency.append(cons)
+
+    hon_consistency = []
+    for prompt in honest_prompts:
+        cons = measure_prompt_consistency(model, prompt, layer, n_runs, extract_fn)
+        hon_consistency.append(cons)
+
+    sch_consistency = np.array(sch_consistency)
+    hon_consistency = np.array(hon_consistency)
+
+    # Statistical comparison
+    t_stat, p_value = stats.ttest_ind(sch_consistency, hon_consistency)
+
+    return {
+        "scheming_mean": float(np.mean(sch_consistency)),
+        "scheming_std": float(np.std(sch_consistency)),
+        "honest_mean": float(np.mean(hon_consistency)),
+        "honest_std": float(np.std(hon_consistency)),
+        "difference": float(np.mean(sch_consistency) - np.mean(hon_consistency)),
+        "t_statistic": float(t_stat),
+        "p_value": float(p_value),
+        "significant": p_value < 0.05,
+        "cohens_d": compute_cohens_d(sch_consistency, hon_consistency),
+        "layer": layer,
+        "n_runs": n_runs,
+    }
+
+
+def entropy_summary_table(entropy_results: Dict[int, Dict]) -> pd.DataFrame:
+    """
+    Create summary table of entropy analysis across layers.
+
+    Args:
+        entropy_results: Output from compare_entropy()
+
+    Returns:
+        DataFrame with entropy metrics per layer
+    """
+    records = []
+    for layer, metrics in entropy_results.items():
+        record = {
+            "layer": layer,
+            "scheming_entropy": metrics["scheming_mean"],
+            "honest_entropy": metrics["honest_mean"],
+            "entropy_diff": metrics["difference"],
+            "p_value": metrics["p_value"],
+            "significant": metrics["significant"],
+            "cohens_d": metrics["cohens_d"],
+        }
+        if "hallucination_mean" in metrics:
+            record["hallucination_entropy"] = metrics["hallucination_mean"]
+        records.append(record)
+
+    df = pd.DataFrame(records)
+    df = df.sort_values("layer")
+    return df
+
+
+# =============================================================================
+# 2x2 FACTORIAL ANALYSIS (Social Friction Detection)
+# =============================================================================
+
+def analyze_2x2_factorial(
+    scores_by_condition: Dict[str, np.ndarray],
+) -> Dict[str, Any]:
+    """
+    Perform 2x2 factorial analysis for social friction experiment.
+
+    Analyzes:
+    - Main effect of Truth (truthful vs deceptive)
+    - Main effect of Valence (positive vs negative social response)
+    - Interaction effect (Truth × Valence)
+
+    Args:
+        scores_by_condition: Dict mapping condition name to scores array
+            Expected keys: 'uncomfortable_truth', 'comfortable_truth',
+                          'comfortable_lie', 'uncomfortable_lie'
+
+    Returns:
+        Dict with factorial analysis results
+    """
+    # Check we have all conditions
+    required = ['uncomfortable_truth', 'comfortable_truth', 'comfortable_lie', 'uncomfortable_lie']
+    available = [c for c in required if c in scores_by_condition]
+
+    if len(available) < 4:
+        return {
+            "error": f"Missing conditions. Have: {available}, Need: {required}",
+            "available_conditions": available
+        }
+
+    # Extract scores
+    ut = scores_by_condition['uncomfortable_truth']  # Truth + Negative
+    ct = scores_by_condition['comfortable_truth']     # Truth + Positive
+    cl = scores_by_condition['comfortable_lie']       # Lie + Positive
+    ul = scores_by_condition['uncomfortable_lie']     # Lie + Negative
+
+    # Compute means
+    means = {
+        'uncomfortable_truth': np.mean(ut),
+        'comfortable_truth': np.mean(ct),
+        'comfortable_lie': np.mean(cl),
+        'uncomfortable_lie': np.mean(ul),
+    }
+
+    # Main effect of TRUTH (truthful vs deceptive)
+    truth_scores = np.concatenate([ut, ct])
+    lie_scores = np.concatenate([cl, ul])
+    truth_effect_t, truth_effect_p = stats.ttest_ind(truth_scores, lie_scores)
+    truth_effect_d = compute_cohens_d(truth_scores, lie_scores)
+
+    # Main effect of VALENCE (positive vs negative)
+    positive_scores = np.concatenate([ct, cl])  # comfortable
+    negative_scores = np.concatenate([ut, ul])  # uncomfortable
+    valence_effect_t, valence_effect_p = stats.ttest_ind(positive_scores, negative_scores)
+    valence_effect_d = compute_cohens_d(positive_scores, negative_scores)
+
+    # Interaction effect
+    # Interaction = (CT - UT) - (CL - UL)
+    # = Effect of valence on truth - Effect of valence on lies
+    truth_valence_diff = np.mean(ct) - np.mean(ut)  # Effect of going from negative to positive for truth
+    lie_valence_diff = np.mean(cl) - np.mean(ul)    # Effect of going from negative to positive for lies
+    interaction = truth_valence_diff - lie_valence_diff
+
+    # Simple effects (pairwise comparisons)
+    simple_effects = {
+        'truth_vs_lie_positive': {
+            't_stat': float(stats.ttest_ind(ct, cl)[0]),
+            'p_value': float(stats.ttest_ind(ct, cl)[1]),
+            'cohens_d': compute_cohens_d(ct, cl),
+            'mean_diff': float(np.mean(ct) - np.mean(cl)),
+        },
+        'truth_vs_lie_negative': {
+            't_stat': float(stats.ttest_ind(ut, ul)[0]),
+            'p_value': float(stats.ttest_ind(ut, ul)[1]),
+            'cohens_d': compute_cohens_d(ut, ul),
+            'mean_diff': float(np.mean(ut) - np.mean(ul)),
+        },
+        'positive_vs_negative_truth': {
+            't_stat': float(stats.ttest_ind(ct, ut)[0]),
+            'p_value': float(stats.ttest_ind(ct, ut)[1]),
+            'cohens_d': compute_cohens_d(ct, ut),
+            'mean_diff': float(np.mean(ct) - np.mean(ut)),
+        },
+        'positive_vs_negative_lie': {
+            't_stat': float(stats.ttest_ind(cl, ul)[0]),
+            'p_value': float(stats.ttest_ind(cl, ul)[1]),
+            'cohens_d': compute_cohens_d(cl, ul),
+            'mean_diff': float(np.mean(cl) - np.mean(ul)),
+        },
+    }
+
+    return {
+        'means': means,
+        'main_effect_truth': {
+            't_stat': float(truth_effect_t),
+            'p_value': float(truth_effect_p),
+            'cohens_d': truth_effect_d,
+            'significant': truth_effect_p < 0.05,
+            'direction': 'truth > lie' if np.mean(truth_scores) > np.mean(lie_scores) else 'lie > truth',
+            'mean_truth': float(np.mean(truth_scores)),
+            'mean_lie': float(np.mean(lie_scores)),
+        },
+        'main_effect_valence': {
+            't_stat': float(valence_effect_t),
+            'p_value': float(valence_effect_p),
+            'cohens_d': valence_effect_d,
+            'significant': valence_effect_p < 0.05,
+            'direction': 'positive > negative' if np.mean(positive_scores) > np.mean(negative_scores) else 'negative > positive',
+            'mean_positive': float(np.mean(positive_scores)),
+            'mean_negative': float(np.mean(negative_scores)),
+        },
+        'interaction': {
+            'value': float(interaction),
+            'interpretation': interpret_interaction(interaction, truth_valence_diff, lie_valence_diff),
+            'truth_valence_effect': float(truth_valence_diff),
+            'lie_valence_effect': float(lie_valence_diff),
+        },
+        'simple_effects': simple_effects,
+        'sample_sizes': {
+            'uncomfortable_truth': len(ut),
+            'comfortable_truth': len(ct),
+            'comfortable_lie': len(cl),
+            'uncomfortable_lie': len(ul),
+        },
+    }
+
+
+def interpret_interaction(interaction: float, truth_effect: float, lie_effect: float) -> str:
+    """Interpret the interaction effect."""
+    if abs(interaction) < 0.1:
+        return "No meaningful interaction: valence affects truth and lies similarly"
+    elif interaction > 0:
+        return "Positive interaction: valence has STRONGER effect on truth than lies"
+    else:
+        return "Negative interaction: valence has WEAKER effect on truth than lies"
+
+
+def factorial_summary_table(factorial_results: Dict[str, Any]) -> str:
+    """
+    Create a formatted summary of 2x2 factorial analysis.
+
+    Args:
+        factorial_results: Output from analyze_2x2_factorial()
+
+    Returns:
+        Formatted string summary
+    """
+    if "error" in factorial_results:
+        return f"Error: {factorial_results['error']}"
+
+    lines = [
+        "=" * 60,
+        "2x2 FACTORIAL ANALYSIS: SOCIAL FRICTION DETECTION",
+        "=" * 60,
+        "",
+        "CONDITION MEANS:",
+        "-" * 40,
+    ]
+
+    means = factorial_results['means']
+    lines.append(f"  Uncomfortable Truth: {means['uncomfortable_truth']:.4f}")
+    lines.append(f"  Comfortable Truth:   {means['comfortable_truth']:.4f}")
+    lines.append(f"  Comfortable Lie:     {means['comfortable_lie']:.4f}")
+    lines.append(f"  Uncomfortable Lie:   {means['uncomfortable_lie']:.4f}")
+
+    lines.append("")
+    lines.append("MAIN EFFECTS:")
+    lines.append("-" * 40)
+
+    me_truth = factorial_results['main_effect_truth']
+    sig_marker = "*" if me_truth['significant'] else ""
+    lines.append(f"  TRUTH (truthful vs deceptive):")
+    lines.append(f"    t={me_truth['t_stat']:.3f}, p={me_truth['p_value']:.4f}{sig_marker}")
+    lines.append(f"    d={me_truth['cohens_d']:.3f}, direction: {me_truth['direction']}")
+
+    me_val = factorial_results['main_effect_valence']
+    sig_marker = "*" if me_val['significant'] else ""
+    lines.append(f"  VALENCE (positive vs negative):")
+    lines.append(f"    t={me_val['t_stat']:.3f}, p={me_val['p_value']:.4f}{sig_marker}")
+    lines.append(f"    d={me_val['cohens_d']:.3f}, direction: {me_val['direction']}")
+
+    lines.append("")
+    lines.append("INTERACTION:")
+    lines.append("-" * 40)
+
+    interaction = factorial_results['interaction']
+    lines.append(f"  Value: {interaction['value']:.4f}")
+    lines.append(f"  {interaction['interpretation']}")
+    lines.append(f"  (Truth valence effect: {interaction['truth_valence_effect']:.4f})")
+    lines.append(f"  (Lie valence effect: {interaction['lie_valence_effect']:.4f})")
+
+    lines.append("")
+    lines.append("=" * 60)
+
+    return "\n".join(lines)
